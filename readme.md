@@ -17,7 +17,7 @@ A Discord bot system for tracking user activity and generating analytics.
    - `selbot.py`: Status monitoring bot configuration
 4. Install required packages:
    ```bash
-pip install discum requests matplotlib pandas
+   pip install discum requests matplotlib pandas
    ```
 5. Run the bots:
    ```bash
