@@ -5,34 +5,46 @@ import time
 import json
 import os
 from datetime import datetime, timedelta
+import signal
+import sys
+import subprocess
+import psutil
+import platform
+from PIL import Image, ImageDraw, ImageFont
+import io
 
-# Bot Configuration
-TOKEN = 'YOUR_BOT_TOKEN'  # Replace with your Discord bot token
+# Load configuration
+def load_config():
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+            
+        # Ensure directories exist
+        for path_type, path in config['paths'].items():
+            if isinstance(path, str) and not path.endswith('.json') and not path.endswith('.txt'):
+                os.makedirs(path, exist_ok=True)
+            elif isinstance(path, dict):
+                # Handle nested paths like fonts
+                for _, nested_path in path.items():
+                    os.makedirs(os.path.dirname(nested_path), exist_ok=True)
+                    
+        return config
+    except FileNotFoundError:
+        print("Error: config.json not found!")
+        exit(1)
 
-# Webhook Configuration
+# Get config
+config = load_config()
+TOKEN = config['tokens']['selfbot']
 WEBHOOK_CONFIG = {
-    'SELFBOT': {
-        'url': 'YOUR_WEBHOOK_URL',  # Replace with your webhook URL for selfbot
-        'avatar': 'https://cdn-icons-png.flaticon.com/512/1246/1246884.png'
-    },
-    'LOGS': {
-        'url': 'YOUR_WEBHOOK_URL',  # Replace with your webhook URL for logs
-        'avatar': 'https://cdn-icons-png.flaticon.com/512/4725/4725478.png'
-    }
+    'SELFBOT': config['webhooks']['selfbot'],
+    'LOGS': config['webhooks']['logs']
 }
-
-# Users to track (Discord User IDs)
-USERS_TO_MONITOR = [
-    "USER_ID_1",  # Replace with Discord user IDs to monitor
-    "USER_ID_2",
-    "USER_ID_3",
-]
-
-# Users who will receive status alerts
-ALERT_RECIPIENTS = [
-    "RECIPIENT_ID_1",  # Replace with Discord user IDs to receive alerts
-    # Add more user IDs as needed
-]
+USERS_TO_MONITOR = config['users_to_monitor']
+ALERT_RECIPIENTS = config['alert_recipients']
+ADMIN_USER_ID = config['admin_user_id']
+COMMAND_PREFIX = config['command_prefix']
+PATHS = config['paths']
 
 # Initialize Discord client
 bot = discum.Client(token=TOKEN, log={"console":False, "file":False})
@@ -41,34 +53,24 @@ bot = discum.Client(token=TOKEN, log={"console":False, "file":False})
 sessions = {}
 
 def send_webhook(content, webhook_type='LOGS', username=None):
-    """
-    Send a message through Discord webhook
-    
-    Args:
-        content: Message to send
-        webhook_type: Type of webhook (LOGS or SELFBOT)
-        username: Optional custom username for the webhook
-    """
     if username is None:
-        username = "Session Monitor" if webhook_type == 'SELFBOT' else "Error Log"
+        username = "Session Monitor" if webhook_type == 'SELFBOT' else "System Log"
+    
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    formatted_content = f"[{timestamp}] {content}"
     
     payload = {
         "username": username,
         "avatar_url": WEBHOOK_CONFIG[webhook_type]['avatar'],
-        "content": content if "```" in content else f"```\n{content}\n```"
+        "content": formatted_content if "```" in formatted_content else f"```\n{formatted_content}\n```"
     }
     
     try:
         requests.post(WEBHOOK_CONFIG[webhook_type]['url'], json=payload)
     except Exception as e:
-        print(f"Webhook error: {str(e)}")
+        print(f"[ERROR] Webhook error: {str(e)}")
 
 def save_session_data(user_id, username, start_time, end_time):
-    """
-    Save session data with multi-day handling
-    
-    Splits sessions that span across midnight into separate daily records
-    """
     try:
         current_time = int(time.time())
         print(f"[DEBUG] Saving session: user={username}, start={start_time}, end={end_time}, current={current_time}")
@@ -77,18 +79,15 @@ def save_session_data(user_id, username, start_time, end_time):
             print(f"[ERROR] Invalid timestamps detected")
             return
         
-        # Convert timestamps to datetime for comparison
         start_dt = datetime.fromtimestamp(start_time)
         end_dt = datetime.fromtimestamp(end_time)
         
         print(f"[DEBUG] Session dates: start={start_dt}, end={end_dt}")
         
-        # Handle sessions spanning multiple days
         if start_dt.date() != end_dt.date():
             print(f"[INFO] Session spans multiple days for {username}")
             save_daily_session(user_id, username, start_time, end_time)
         else:
-            # Single day session
             save_daily_session(user_id, username, start_time, end_time)
             
     except Exception as e:
@@ -96,21 +95,14 @@ def save_session_data(user_id, username, start_time, end_time):
         send_webhook(f"[ERROR] Failed to save session: {str(e)}", 'LOGS')
 
 def save_daily_session(user_id, username, start_time, end_time):
-    """
-    Save a session for a specific day
-    
-    Handles session merging if sessions are close together
-    """
     try:
         current_time = int(time.time())
         print(f"[DEBUG] Saving session: {username} from {start_time} to {end_time}")
         
-        # Validate timestamps
         if start_time > current_time or end_time > current_time:
             print(f"[ERROR] Invalid timestamps detected")
             return
             
-        # Calculate duration
         duration = end_time - start_time
         if duration <= 0:
             print(f"[ERROR] Invalid duration: {duration}s")
@@ -127,60 +119,46 @@ def save_daily_session(user_id, username, start_time, end_time):
             'date': date
         }
 
-        filename = 'session_data.json'
-        
         try:
-            # Read or create session file
-            if os.path.exists(filename):
-                with open(filename, 'r', encoding='utf-8') as f:
+            if os.path.exists(PATHS['session_data']):
+                with open(PATHS['session_data'], 'r', encoding='utf-8') as f:
                     all_sessions = json.load(f)
             else:
                 all_sessions = []
                 
             print(f"[DEBUG] Loaded {len(all_sessions)} existing sessions")
             
-            # Look for recent sessions to merge
-            SESSION_MERGE_THRESHOLD = 60  # Seconds between sessions to merge
+            SESSION_MERGE_THRESHOLD = 60
             merged = False
             
-            # Check recent sessions for possible merging
             for i in range(len(all_sessions) - 1, -1, -1):
                 session = all_sessions[i]
                 if (session['user_id'] == user_id and 
                     session['date'] == date and 
                     abs(start_time - session['end_time']) <= SESSION_MERGE_THRESHOLD):
                     
-                    # Merge sessions
                     all_sessions[i]['end_time'] = end_time
                     all_sessions[i]['duration'] = end_time - session['start_time']
                     merged = True
                     print(f"[INFO] Merged session for {username} (Duration: {all_sessions[i]['duration']}s)")
                     break
             
-            # Add new session if no merge occurred
             if not merged:
                 all_sessions.append(new_session)
                 print(f"[INFO] Added new session for {username} (Duration: {duration}s)")
             
-            # Save to file
-            with open(filename, 'w', encoding='utf-8') as f:
+            with open(PATHS['session_data'], 'w', encoding='utf-8') as f:
                 json.dump(all_sessions, f, indent=4)
-                print(f"[INFO] Successfully saved to {filename}")
+                print(f"[INFO] Successfully saved to {PATHS['session_data']}")
             
         except Exception as e:
             print(f"[ERROR] Failed to handle file operations: {str(e)}")
             
     except Exception as e:
         print(f"[ERROR] Failed to save session: {str(e)}")
-
 def get_daily_stats(user_id, date):
-    """
-    Get statistics for a specific day
-    
-    Returns dict with session count, total duration, and average session length
-    """
     try:
-        with open('session_data.json', 'r', encoding='utf-8') as f:
+        with open(PATHS['session_data'], 'r', encoding='utf-8') as f:
             sessions = json.load(f)
         
         daily_sessions = [s for s in sessions if s['user_id'] == user_id and s['date'] == date]
@@ -195,7 +173,6 @@ def get_daily_stats(user_id, date):
         return None
 
 def format_stats(stats, username, date):
-    """Format daily statistics for display"""
     if not stats:
         return f"No data for {username} on {date}"
     
@@ -207,30 +184,24 @@ def format_stats(stats, username, date):
     )
 
 def format_duration(seconds):
-    """Format duration in HH:MM:SS"""
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     seconds = seconds % 60
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 def get_user_info(user_id):
-    """Get Discord user information"""
     try:
         user_info = bot.getProfile(user_id)
         return user_info.json()['user']['username']
     except:
         return 'Unknown'
 
-# Add this new function to send DMs
 def send_dm(user_id, content):
-    """Send a direct message to a user"""
     try:
-        # First, create/open a DM channel
         dm_channel = bot.createDM([user_id]).json()
         channel_id = dm_channel['id']
         print(f"[DEBUG] Opening DM channel: {channel_id}")
         
-        # Send the message
         response = bot.sendMessage(channel_id, content)
         print(f"[DEBUG] Message sent: {response.status_code}")
         
@@ -240,13 +211,209 @@ def send_dm(user_id, content):
     except Exception as e:
         print(f"[ERROR] Failed to send DM: {str(e)}")
 
+def refresh_sessions():
+    current_time = int(time.time())
+    
+    try:
+        for user_id, session_data in sessions.copy().items():
+            if 'start_time' in session_data and session_data['start_time'] is not None:
+                try:
+                    username = get_user_info(user_id)
+                    start_time = session_data['start_time']
+                    
+                    if start_time <= current_time:
+                        print(f"[INFO] Saving session for {username} during refresh")
+                        save_daily_session(user_id, username, start_time, current_time)
+                except Exception as e:
+                    print(f"[ERROR] Failed to save session during refresh for {user_id}: {str(e)}")
+        
+        sessions.clear()
+        return "✅ Successfully saved all current sessions!"
+    except Exception as e:
+        error_msg = f"❌ Failed to save sessions: {str(e)}"
+        print(f"[ERROR] {error_msg}")
+        return error_msg
+
+def get_system_info():
+    try:
+        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_count = psutil.cpu_count()
+        
+        memory = psutil.virtual_memory()
+        memory_total = memory.total / (1024 ** 3)
+        memory_used = memory.used / (1024 ** 3)
+        memory_percent = memory.percent
+        
+        disk = psutil.disk_usage('/')
+        disk_total = disk.total / (1024 ** 3)
+        disk_used = disk.used / (1024 ** 3)
+        disk_percent = disk.percent
+        
+        boot_time = datetime.fromtimestamp(psutil.boot_time())
+        uptime = datetime.now() - boot_time
+        
+        fields = [
+            {
+                "name": "🖥️ CPU",
+                "value": f"```Usage: {cpu_percent}%\nCores: {cpu_count}```",
+                "inline": True
+            },
+            {
+                "name": "💾 Memory",
+                "value": f"```Total: {memory_total:.1f}GB\nUsed: {memory_used:.1f}GB\nUsage: {memory_percent}%```",
+                "inline": True
+            },
+            {
+                "name": "💿 Disk",
+                "value": f"```Total: {disk_total:.1f}GB\nUsed: {disk_used:.1f}GB\nUsage: {disk_percent}%```",
+                "inline": True
+            },
+            {
+                "name": "⚙️ System",
+                "value": f"```OS: {platform.system()} {platform.release()}\nUptime: {str(uptime).split('.')[0]}```",
+                "inline": False
+            }
+        ]
+        
+        return fields
+    except Exception as e:
+        print(f"[ERROR] Failed to get system info: {str(e)}")
+        send_webhook(f"Failed to get system info: {str(e)}", 'LOGS')
+        return None
+
+def create_stats_image():
+    try:
+        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_count = psutil.cpu_count()
+        
+        memory = psutil.virtual_memory()
+        memory_total = memory.total / (1024 ** 3)
+        memory_used = memory.used / (1024 ** 3)
+        memory_percent = memory.percent
+        
+        disk = psutil.disk_usage('/')
+        disk_total = disk.total / (1024 ** 3)
+        disk_used = disk.used / (1024 ** 3)
+        disk_percent = disk.percent
+        
+        boot_time = datetime.fromtimestamp(psutil.boot_time())
+        uptime = datetime.now() - boot_time
+
+        width = 800
+        height = 400
+        background_color = (44, 47, 51)
+        text_color = (255, 255, 255)
+        
+        image = Image.new('RGB', (width, height), background_color)
+        draw = ImageDraw.Draw(image)
+        
+        try:
+            title_font = ImageFont.truetype(PATHS['fonts']['arial'], 36)
+            main_font = ImageFont.truetype(PATHS['fonts']['arial'], 24)
+        except:
+            title_font = ImageFont.load_default()
+            main_font = ImageFont.load_default()
+
+        title = "System Usage Statistics"
+        draw.text((width/2, 30), title, font=title_font, fill=text_color, anchor="mm")
+
+        y_position = 100
+        padding = 20
+        
+        stats_text = [
+            f"CPU Usage: {cpu_percent}% | Cores: {cpu_count}",
+            f"Memory: {memory_used:.1f}GB / {memory_total:.1f}GB ({memory_percent}%)",
+            f"Disk: {disk_used:.1f}GB / {disk_total:.1f}GB ({disk_percent}%)",
+            f"OS: {platform.system()} {platform.release()}",
+            f"Uptime: {str(uptime).split('.')[0]}"
+        ]
+
+        for text in stats_text:
+            draw.text((padding, y_position), text, font=main_font, fill=text_color)
+            y_position += 50
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        draw.text((width-padding, height-padding), timestamp, font=main_font, fill=text_color, anchor="rb")
+
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        
+        return img_byte_arr.getvalue()
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to create stats image: {str(e)}")
+        return None
+
+def send_usage_stats(channel_id, username):
+    try:
+        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_count = psutil.cpu_count()
+        
+        memory = psutil.virtual_memory()
+        memory_total = memory.total / (1024 ** 3)
+        memory_used = memory.used / (1024 ** 3)
+        memory_percent = memory.percent
+        
+        disk = psutil.disk_usage('/')
+        disk_total = disk.total / (1024 ** 3)
+        disk_used = disk.used / (1024 ** 3)
+        disk_percent = disk.percent
+        
+        boot_time = datetime.fromtimestamp(psutil.boot_time())
+        uptime = datetime.now() - boot_time
+
+        message = (
+            "📊 **System Usage Statistics**\n\n"
+            "🖥️ **CPU**\n"
+            f"```Usage: {cpu_percent}%\nCores: {cpu_count}```\n"
+            "💾 **Memory**\n"
+            f"```Total: {memory_total:.1f}GB\nUsed: {memory_used:.1f}GB\nUsage: {memory_percent}%```\n"
+            "💿 **Disk**\n"
+            f"```Total: {disk_total:.1f}GB\nUsed: {disk_used:.1f}GB\nUsage: {disk_percent}%```\n"
+            "⚙️ **System**\n"
+            f"```OS: {platform.system()} {platform.release()}\nUptime: {str(uptime).split('.')[0]}```\n\n"
+            f"*Requested by {username} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*"
+        )
+        
+        bot.sendMessage(channel_id, message)
+        send_webhook("System usage stats sent", 'LOGS')
+        
+    except Exception as e:
+        error_msg = f"Failed to send usage stats: {str(e)}"
+        bot.sendMessage(channel_id, f"❌ {error_msg}")
+        send_webhook(f"Error sending usage stats: {error_msg}", 'LOGS')
+
 @bot.gateway.command
 def handle_events(resp):
-    """
-    Handle Discord presence update events
-    
-    Tracks when users go online/offline and saves session data
-    """
+    if resp.event.message:
+        try:
+            m = resp.parsed.auto()
+            if m['author']['id'] == ADMIN_USER_ID:
+                channel_id = m['channel_id']
+                
+                if m['content'].startswith(f'{COMMAND_PREFIX}usage'):
+                    send_usage_stats(channel_id, m['author']['username'])
+                
+                elif m['content'].startswith(f'{COMMAND_PREFIX}give'):
+                    try:
+                        with open(PATHS['session_data'], 'rb') as f:
+                            bot.sendFile(channel_id, "session_data.json", f)
+                            send_webhook(f"Session data file sent to {m['author']['username']}", 'LOGS')
+                    except Exception as e:
+                        error_msg = f"Failed to send file: {str(e)}"
+                        bot.sendMessage(channel_id, f"❌ {error_msg}")
+                        send_webhook(f"Error sending file: {error_msg}", 'LOGS')
+                
+                elif m['content'].startswith(f'{COMMAND_PREFIX}refresh'):
+                    result = refresh_sessions()
+                    bot.sendMessage(channel_id, result)
+                    send_webhook(f"Refresh command executed by {m['author']['username']}", 'LOGS')
+                    
+        except Exception as e:
+            print(f"[ERROR] Failed to process command: {str(e)}")
+            send_webhook(f"Error processing command: {str(e)}", 'LOGS')
+            
     if resp.event.presence_updated:
         try:
             data = resp.parsed.auto()
@@ -257,7 +424,6 @@ def handle_events(resp):
             
             print(f"[DEBUG] Processing status update for user {user_id}")
             
-            # Get username reliably
             try:
                 user_info = bot.getProfile(user_id)
                 username = user_info.json()['user']['username']
@@ -269,7 +435,6 @@ def handle_events(resp):
             current_status = data.get('status', 'offline')
             current_time = int(time.time())
             
-            # Handle status change
             previous_status = sessions.get(user_id, {}).get('status', 'offline')
             
             if current_status != previous_status:
@@ -278,36 +443,30 @@ def handle_events(resp):
                 
                 sessions[user_id]['status'] = current_status
                 
-                # Use Discord timestamp format
                 timestamp = int(time.time())
-                discord_timestamp = f"<t:{timestamp}:f>"  # 'f' gives full date/time format
+                discord_timestamp = f"<t:{timestamp}:f>"
                 
-                if current_status == 'online':
-                    status_emoji = ":green_circle:"
-                elif current_status == 'offline':
-                    status_emoji = ":black_circle:"
-                elif current_status == 'idle':
-                    status_emoji = ":yellow_circle:"
-                elif current_status == 'dnd':
-                    status_emoji = ":red_circle:"
+                status_emoji = {
+                    'online': ":green_circle:",
+                    'idle': ":yellow_circle:",
+                    'dnd': ":red_circle:",
+                    'offline': ":black_circle:"
+                }.get(current_status, ":black_circle:")
                 
-                # New cleaner format without the "+" prefix
                 status_msg = (
-                    f"**Status Update for {username}**\n\n"  # Bold text instead of "+"
+                    f"**Status Update for {username}**\n\n"
                     f"{status_emoji} New Status: {current_status.capitalize()}\n"
                     f":arrow_right: Previous Status: {previous_status.capitalize()}\n"
                     f":clock3: {discord_timestamp}"
                 )
                 
-                # Send to all alert recipients
                 for recipient_id in ALERT_RECIPIENTS:
                     send_dm(recipient_id, status_msg)
                 
-                # Handle session tracking
-                if current_status == 'online' and previous_status != 'online':
+                if current_status != 'offline' and previous_status == 'offline':
                     sessions[user_id]['start_time'] = current_time
-                    print(f"[INFO] Session started for {username}")
-                elif previous_status == 'online' and current_status != 'online':
+                    print(f"[INFO] Session started for {username} with status {current_status}")
+                elif previous_status != 'offline' and current_status == 'offline':
                     start_time = sessions[user_id].get('start_time')
                     if start_time and start_time <= current_time:
                         print(f"[INFO] Saving session for {username}")
@@ -317,16 +476,39 @@ def handle_events(resp):
         except Exception as e:
             print(f"[ERROR] Failed to process presence: {str(e)}")
 
+def signal_handler(sig, frame):
+    print("\nSaving sessions before exit...")
+    current_time = int(time.time())
+    
+    for user_id, session_data in sessions.copy().items():
+        if 'start_time' in session_data and session_data['start_time'] is not None:
+            try:
+                username = get_user_info(user_id)
+                start_time = session_data['start_time']
+                
+                if start_time <= current_time:
+                    print(f"[INFO] Saving final session for {username}")
+                    save_daily_session(user_id, username, start_time, current_time)
+            except Exception as e:
+                print(f"[ERROR] Failed to save final session for {user_id}: {str(e)}")
+    
+    print("Sessions saved. Exiting...")
+    sys.exit(0)
+
 def main():
-    """Main bot execution"""
     print("Starting bot...")
     send_webhook("Bot starting...", 'LOGS')
     
-    if not os.path.exists('session_data.json'):
-        with open('session_data.json', 'w') as f:
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    if not os.path.exists(PATHS['session_data']):
+        with open(PATHS['session_data'], 'w') as f:
             json.dump([], f)
     
     try:
+        if len(sys.argv) == 1:
+            subprocess.Popen([sys.executable, "dataanalyst.py"])
+        
         bot.gateway.run(auto_reconnect=True)
     except Exception as e:
         error_msg = f"Bot crashed: {str(e)}"

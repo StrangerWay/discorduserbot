@@ -1,0 +1,39 @@
+{
+    "tokens": {
+        "data_analyst": "YOUR_DATA_ANALYST_BOT_TOKEN",
+        "selfbot": "YOUR_SELFBOT_TOKEN"
+    },
+    "webhooks": {
+        "data_analyst": {
+            "url": "YOUR_DATA_ANALYST_WEBHOOK_URL",
+            "avatar": "https://cdn-icons-png.flaticon.com/512/1925/1925173.png"
+        },
+        "selfbot": {
+            "url": "YOUR_SELFBOT_WEBHOOK_URL",
+            "avatar": "https://cdn-icons-png.flaticon.com/512/1246/1246884.png"
+        },
+        "logs": {
+            "url": "YOUR_LOGS_WEBHOOK_URL",
+            "avatar": "https://cdn-icons-png.flaticon.com/512/4725/4725478.png"
+        }
+    },
+    "paths": {
+        "session_data": "data/session_data.json",
+        "logs": "logs/bot_logs.txt",
+        "fonts": {
+            "arial": "fonts/arial.ttf",
+            "default": "fonts/default.ttf"
+        },
+        "images": "images/",
+        "temp": "temp/"
+    },
+    "users_to_monitor": [
+        "USER_ID_1",
+        "USER_ID_2",
+        "USER_ID_3"
+
+    ],
+    "alert_recipients": ["YOUR_ALERT_RECIPIENT_ID"],
+    "admin_user_id": "YOUR_ADMIN_USER_ID",
+    "command_prefix": "/"
+}

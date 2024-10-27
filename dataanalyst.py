@@ -2,6 +2,7 @@
 import matplotlib
 matplotlib.use('Agg')  # Set backend to non-interactive 'Agg'
 
+
 # Rest of the imports
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -14,23 +15,36 @@ import discum
 from datetime import datetime
 from datetime import timedelta
 from io import BytesIO
+import matplotlib.dates
+# Load configuration
+def load_config():
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+            
+        # Ensure directories exist
+        for path_type, path in config['paths'].items():
+            if isinstance(path, str) and not path.endswith('.json') and not path.endswith('.txt'):
+                os.makedirs(path, exist_ok=True)
+            elif isinstance(path, dict):
+                # Handle nested paths like fonts
+                for _, nested_path in path.items():
+                    os.makedirs(os.path.dirname(nested_path), exist_ok=True)
+                    
+        return config
+    except FileNotFoundError:
+        print("Error: config.json not found!")
+        exit(1)
 
-# Bot Configuration
-TOKEN = 'YOUR_BOT_TOKEN'  # Replace with your Discord bot token
-GUILD_ID = "YOUR_GUILD_ID"  # Replace with your Discord server ID
-COMMAND_PREFIX = "!"
-
-# Webhook Configuration
+# Get config
+config = load_config()
+TOKEN = config['tokens']['data_analyst']
 WEBHOOK_CONFIG = {
-    'DATA_ANALYST': {
-        'url': 'YOUR_WEBHOOK_URL',  # Replace with your webhook URL for data analysis
-        'avatar': 'https://cdn-icons-png.flaticon.com/512/1925/1925173.png'
-    },
-    'LOGS': {
-        'url': 'YOUR_WEBHOOK_URL',  # Replace with your webhook URL for logs
-        'avatar': 'https://cdn-icons-png.flaticon.com/512/4725/4725478.png'
-    }
+    'DATA_ANALYST': config['webhooks']['data_analyst'],
+    'LOGS': config['webhooks']['logs']
 }
+COMMAND_PREFIX = config['command_prefix']
+PATHS = config['paths']
 
 # Initialize Discord bot
 bot = discum.Client(token=TOKEN, log=False)
@@ -47,18 +61,21 @@ def send_webhook(content, webhook_type='LOGS', username=None):
     if username is None:
         username = "Data Analyst" if webhook_type == 'DATA_ANALYST' else "System Log"
     
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    formatted_content = f"[{timestamp}] {content}"
+    
     payload = {
         "username": username,
         "avatar_url": WEBHOOK_CONFIG[webhook_type]['avatar'],
-        "content": content if "```" in content else f"```\n{content}\n```"
+        "content": formatted_content if "```" in formatted_content else f"```\n{formatted_content}\n```"
     }
     
     try:
         response = requests.post(WEBHOOK_CONFIG[webhook_type]['url'], json=payload)
         if response.status_code != 204:
-            print(f"Webhook error: {response.status_code}")
+            print(f"[ERROR] Webhook error: {response.status_code}")
     except Exception as e:
-        print(f"Webhook error: {str(e)}")
+        print(f"[ERROR] Webhook error: {str(e)}")
 
 def analyze_data():
     """
@@ -67,14 +84,13 @@ def analyze_data():
     Returns:
         bool: True if analysis was successful, False otherwise
     """
+    session_data_path = PATHS['session_data']
+    if not os.path.exists(session_data_path):
+        send_webhook("No session data found", 'LOGS')
+        return False
+        
     try:
-        # Check for data file
-        if not os.path.exists('session_data.json'):
-            send_webhook("No session data found", 'LOGS')
-            return False
-            
-        # Load and validate data
-        with open('session_data.json', 'r') as f:
+        with open(session_data_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             
         if not data:
@@ -109,17 +125,17 @@ def analyze_data():
             
             # Group by date and ensure dates are sorted
             daily_time = user_data.groupby('date')['duration_hours'].sum()
-            daily_time.index = pd.to_datetime(daily_time.index)  # Ensure index is datetime
-            daily_time = daily_time.sort_index()  # Sort by date index
+            daily_time.index = pd.to_datetime(daily_time.index)
+            daily_time = daily_time.sort_index()
             
-            # Create x-axis dates in proper order
-            dates = daily_time.index.strftime('%Y-%m-%d')
-            
-            # Plot with sorted dates
-            plt.plot(range(len(dates)), daily_time.values, label=user, marker='o')
-            
-            # Set x-axis ticks and labels
-            plt.xticks(range(len(dates)), dates, rotation=45, ha='right')
+            # Plot points and lines separately
+            plt.plot(daily_time.index, daily_time.values, 
+                    linestyle='--',  # Make lines dashed
+                    alpha=0.5,       # Make lines semi-transparent
+                    label=user)
+            plt.scatter(daily_time.index, daily_time.values,
+                       marker='o',
+                       s=100)       # Increase point size
             
             # Calculate user statistics
             total_hours = user_data['duration_hours'].sum()
@@ -131,6 +147,11 @@ def analyze_data():
                 'daily_avg': round(avg_hours, 1),
                 'sessions': len(user_data)
             })
+        
+        # Format axes with only the actual dates
+        plt.gcf().autofmt_xdate()
+        plt.xticks(df['date'].unique(), rotation=45)  # Use only the actual dates in the data
+        plt.gca().xaxis.set_major_locator(matplotlib.dates.DayLocator())  # Show only daily ticks
         
         # Configure graph appearance
         plt.title('Daily Online Time by User')
